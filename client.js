@@ -1786,7 +1786,7 @@ function CommandBlock({ label, text, t }) {
 }
 var DEFAULTS = {
   server: { port: 7461 },
-  ssh: { port: 22 },
+  ssh: {},
   adb: {},
   winuser: {},
   reverse: {}
@@ -1994,6 +1994,7 @@ function EnvDialog({ open, environment, environments, platform, defaultMountMode
         value: config.port,
         onChange: (v) => set2("port", v.replace(/\D/g, "")),
         inputMode: "numeric",
+        placeholder: "22",
         mono: true
       }
     ))), /* @__PURE__ */ React6.createElement("div", { className: "envx-field-row", "data-even": "" }, /* @__PURE__ */ React6.createElement(Field, { label: t("field.username") }, /* @__PURE__ */ React6.createElement(TextInput, { value: config.username, onChange: (v) => set2("username", v), mono: true })), /* @__PURE__ */ React6.createElement(Field, { label: t("field.password") }, /* @__PURE__ */ React6.createElement(TextInput, { value: config.password, onChange: (v) => set2("password", v), type: "password" }))), /* @__PURE__ */ React6.createElement("small", { className: "envx-form-note" }, t("field.password.hint")), /* @__PURE__ */ React6.createElement("div", { className: "envx-field-row", "data-even": "" }, /* @__PURE__ */ React6.createElement(Field, { label: t("field.privateKey") }, /* @__PURE__ */ React6.createElement(

@@ -968,7 +968,7 @@ Sec-WebSocket-Accept: ${wsAcceptKey(key)}\r
 }
 
 // packages/plugin/src/api/actions.ts
-import os4 from "node:os";
+import os5 from "node:os";
 import path6 from "node:path";
 
 // packages/plugin/src/env/winuser/accounts.ts
@@ -2504,6 +2504,102 @@ async function listAdbDevices(adb = "adb") {
   return devices;
 }
 
+// packages/plugin/src/env/ssh/ssh-config.ts
+import { execFile, spawn as spawn3 } from "node:child_process";
+import os4 from "node:os";
+import { Duplex } from "node:stream";
+import { promisify } from "node:util";
+function expandHome(p) {
+  return p.replace(/^~(?=$|[\\/])/, os4.homedir());
+}
+function parseSshG(text2) {
+  const values = /* @__PURE__ */ new Map();
+  const identityFiles = [];
+  for (const line of text2.split(/\r?\n/)) {
+    const match = /^(\S+)\s+(.*\S)/.exec(line.trim());
+    if (!match) continue;
+    const key = (match[1] ?? "").toLowerCase();
+    const value = match[2] ?? "";
+    if (key === "identityfile") identityFiles.push(expandHome(value));
+    else if (value !== "none" && !values.has(key)) values.set(key, value);
+  }
+  const host = values.get("hostname");
+  if (!host) return void 0;
+  const proxyJump = values.get("proxyjump");
+  const proxyCommand = values.get("proxycommand");
+  return {
+    host,
+    port: Number(values.get("port") ?? 22),
+    user: values.get("user") ?? os4.userInfo().username,
+    identityFiles,
+    ...proxyJump ? { proxyJump } : {},
+    ...proxyCommand ? { proxyCommand } : {}
+  };
+}
+async function resolveSshTarget(host, signal) {
+  try {
+    const { stdout } = await promisify(execFile)("ssh", ["-G", "--", host], {
+      timeout: 1e4,
+      windowsHide: true,
+      ...signal ? { signal } : {}
+    });
+    return parseSshG(stdout);
+  } catch {
+    return void 0;
+  }
+}
+function expandProxyTokens(command, dest) {
+  const values = {
+    "%": "%",
+    h: dest.host,
+    n: dest.alias,
+    p: String(dest.port),
+    r: dest.user
+  };
+  return command.replace(/%([%hnpr])/g, (_, token) => values[token] ?? "");
+}
+function proxyJumpArgs(proxyJump, dest) {
+  const hops = proxyJump.split(",").map((hop2) => hop2.trim());
+  const last = hops.pop() ?? "";
+  const args = ["-o", "BatchMode=yes", "-W", `${dest.host}:${dest.port}`];
+  if (hops.length > 0) args.push("-J", hops.join(","));
+  const hop = /^(?:(.+)@)?(?:\[([^\]]+)\]|([^:@]+))(?::(\d+))?$/.exec(last);
+  if (!hop || last.startsWith("ssh://")) return [...args, last];
+  const [, user, bracketed, plain, port] = hop;
+  if (user) args.push("-l", user);
+  if (port) args.push("-p", port);
+  args.push(bracketed ?? plain ?? last);
+  return args;
+}
+function openProxy(target, dest) {
+  let child;
+  if (target.proxyCommand) {
+    child = spawn3(expandProxyTokens(target.proxyCommand, dest), { shell: true, windowsHide: true });
+  } else if (target.proxyJump) {
+    child = spawn3("ssh", proxyJumpArgs(target.proxyJump, dest), { windowsHide: true });
+  } else {
+    return void 0;
+  }
+  const sock = Duplex.from({ readable: child.stdout, writable: child.stdin });
+  let stderr = "";
+  let spawnError = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (d) => {
+    stderr = (stderr + d).slice(-4e3);
+  });
+  child.once("error", (e) => {
+    spawnError = e.message;
+  });
+  const closed = new Promise((resolve) => {
+    child.once("close", (code) => {
+      sock.destroy();
+      const lastLine = stderr.trim().split(/\r?\n/).pop();
+      resolve(lastLine || spawnError || (code ? `proxy exited with code ${code}` : ""));
+    });
+  });
+  return { sock, kill: () => child.kill(), closed };
+}
+
 // packages/plugin/src/manager/availability.ts
 var tcpProbe = (host, port, timeoutMs) => new Promise((resolve, reject) => {
   const socket = net4.connect({ host, port });
@@ -2595,8 +2691,16 @@ var AvailabilityChecker = class {
         return { state: "available", checkedAt: at() };
       case "server":
       case "ssh": {
-        const host = c.host ?? "";
-        const port = Number(c.port ?? (def.kind === "ssh" ? 22 : NaN));
+        let host = c.host ?? "";
+        let port = Number(c.port || (def.kind === "ssh" ? 22 : NaN));
+        if (def.kind === "ssh" && host && c.sshConfig !== "off") {
+          const target = await resolveSshTarget(host);
+          if (target?.proxyJump || target?.proxyCommand) return { state: "unknown", reason: "proxied", checkedAt: at() };
+          if (target) {
+            host = target.host;
+            port = c.port || target.port;
+          }
+        }
         if (!host || !Number.isFinite(port)) return { state: "error", reason: "host or port missing", checkedAt: at() };
         try {
           await this.tcp(host, port, this.probeTimeoutMs);
@@ -3054,7 +3158,7 @@ function createActions(ctx, manager, { mounting, borrowing, mountsDir, availabil
       return await deleteWindowsAccount(account, { dataDir: manager.dataDir });
     },
     async defaults() {
-      return { home: os4.homedir(), mountsDir, sep: path6.sep };
+      return { home: os5.homedir(), mountsDir, sep: path6.sep };
     }
   };
 }
@@ -3343,9 +3447,9 @@ function stripAnsi(s) {
 }
 
 // packages/plugin/src/env/adb/adb-env.ts
-import { spawn as spawn3 } from "node:child_process";
+import { spawn as spawn4 } from "node:child_process";
 import fs6 from "node:fs";
-import os5 from "node:os";
+import os6 from "node:os";
 import path9 from "node:path";
 import zlib3 from "node:zlib";
 
@@ -4710,7 +4814,7 @@ var AdbEnvironment = class extends Environment {
   }
   /** Write bytes to a device path through a host temp file and `adb push`. */
   async push(buf, remote) {
-    const tmp = path9.join(os5.tmpdir(), `dsh-adb-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
+    const tmp = path9.join(os6.tmpdir(), `dsh-adb-${process.pid}-${Date.now()}-${Math.random().toString(16).slice(2)}`);
     fs6.writeFileSync(tmp, buf);
     try {
       const r2 = await runHost(this.adb, this.args("push", tmp, remote));
@@ -4785,7 +4889,7 @@ var AdbEnvironment = class extends Environment {
     const envPrefix = Object.entries(spec.env ?? {}).filter(([, v]) => v !== null).map(([k, v]) => `${k}=${shq(v)}`).join(" ");
     if (envPrefix) script = `export ${envPrefix}; ${script}`;
     if (spec.cwd) script = `cd ${shq(spec.cwd)} && ${script}`;
-    const child = spawn3(this.adb, this.args("shell", ...spec.pty ? ["-t", "-t"] : ["-T"], script), {
+    const child = spawn4(this.adb, this.args("shell", ...spec.pty ? ["-t", "-t"] : ["-T"], script), {
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true
     });
@@ -5129,7 +5233,7 @@ function formatForeground(fg) {
 
 // packages/plugin/src/tools/lease/android-tools.ts
 import fs7 from "node:fs";
-import os6 from "node:os";
+import os7 from "node:os";
 import path10 from "node:path";
 function addAndroidTools(t, env) {
   const { label: name2, add, workspaceOf } = t;
@@ -5154,7 +5258,7 @@ function addAndroidTools(t, env) {
       if (!local) {
         const p = srcEnv.resolvePath(args.apk_path, srcCwd);
         const data = await srcEnv.readFile(p, { maxBytes: 4 * 1024 * 1024 * 1024, signal: exec2.signal });
-        temp = path10.join(os6.tmpdir(), `dsh-apk-${Date.now()}-${baseName(p)}`);
+        temp = path10.join(os7.tmpdir(), `dsh-apk-${Date.now()}-${baseName(p)}`);
         fs7.writeFileSync(temp, data);
         local = temp;
       }
@@ -7524,109 +7628,12 @@ import fs8 from "node:fs";
 import os8 from "node:os";
 import path11 from "node:path";
 import ssh2 from "ssh2";
-
-// packages/plugin/src/env/ssh/ssh-config.ts
-import { execFile, spawn as spawn4 } from "node:child_process";
-import os7 from "node:os";
-import { Duplex } from "node:stream";
-import { promisify } from "node:util";
-function expandHome(p) {
-  return p.replace(/^~(?=$|[\\/])/, os7.homedir());
-}
-function parseSshG(text2) {
-  const values = /* @__PURE__ */ new Map();
-  const identityFiles = [];
-  for (const line of text2.split(/\r?\n/)) {
-    const match = /^(\S+)\s+(.*\S)/.exec(line.trim());
-    if (!match) continue;
-    const key = (match[1] ?? "").toLowerCase();
-    const value = match[2] ?? "";
-    if (key === "identityfile") identityFiles.push(expandHome(value));
-    else if (value !== "none" && !values.has(key)) values.set(key, value);
-  }
-  const host = values.get("hostname");
-  if (!host) return void 0;
-  const proxyJump = values.get("proxyjump");
-  const proxyCommand = values.get("proxycommand");
-  return {
-    host,
-    port: Number(values.get("port") ?? 22),
-    user: values.get("user") ?? os7.userInfo().username,
-    identityFiles,
-    ...proxyJump ? { proxyJump } : {},
-    ...proxyCommand ? { proxyCommand } : {}
-  };
-}
-async function resolveSshTarget(host, signal) {
-  try {
-    const { stdout } = await promisify(execFile)("ssh", ["-G", "--", host], {
-      timeout: 1e4,
-      windowsHide: true,
-      ...signal ? { signal } : {}
-    });
-    return parseSshG(stdout);
-  } catch {
-    return void 0;
-  }
-}
-function expandProxyTokens(command, dest) {
-  const values = {
-    "%": "%",
-    h: dest.host,
-    n: dest.alias,
-    p: String(dest.port),
-    r: dest.user
-  };
-  return command.replace(/%([%hnpr])/g, (_, token) => values[token] ?? "");
-}
-function proxyJumpArgs(proxyJump, dest) {
-  const hops = proxyJump.split(",").map((hop2) => hop2.trim());
-  const last = hops.pop() ?? "";
-  const args = ["-o", "BatchMode=yes", "-W", `${dest.host}:${dest.port}`];
-  if (hops.length > 0) args.push("-J", hops.join(","));
-  const hop = /^(?:(.+)@)?(?:\[([^\]]+)\]|([^:@]+))(?::(\d+))?$/.exec(last);
-  if (!hop || last.startsWith("ssh://")) return [...args, last];
-  const [, user, bracketed, plain, port] = hop;
-  if (user) args.push("-l", user);
-  if (port) args.push("-p", port);
-  args.push(bracketed ?? plain ?? last);
-  return args;
-}
-function openProxy(target, dest) {
-  let child;
-  if (target.proxyCommand) {
-    child = spawn4(expandProxyTokens(target.proxyCommand, dest), { shell: true, windowsHide: true });
-  } else if (target.proxyJump) {
-    child = spawn4("ssh", proxyJumpArgs(target.proxyJump, dest), { windowsHide: true });
-  } else {
-    return void 0;
-  }
-  const sock = Duplex.from({ readable: child.stdout, writable: child.stdin });
-  let stderr = "";
-  let spawnError = "";
-  child.stderr.setEncoding("utf8");
-  child.stderr.on("data", (d) => {
-    stderr = (stderr + d).slice(-4e3);
-  });
-  child.once("error", (e) => {
-    spawnError = e.message;
-  });
-  const closed = new Promise((resolve) => {
-    child.once("close", (code) => {
-      sock.destroy();
-      const lastLine = stderr.trim().split(/\r?\n/).pop();
-      resolve(lastLine || spawnError || (code ? `proxy exited with code ${code}` : ""));
-    });
-  });
-  return { sock, kill: () => child.kill(), closed };
-}
-
-// packages/plugin/src/env/ssh/connection.ts
 var DEFAULT_KEY_FILES = ["id_ed25519", "id_ecdsa", "id_rsa"].map((name2) => path11.join(os8.homedir(), ".ssh", name2));
 function sshConnectConfig(cfg, target) {
   const out = {
     host: target?.host ?? cfg.host,
-    port: cfg.port ?? target?.port ?? 22,
+    // 0 is what an emptied port field stores: unset, not a port.
+    port: cfg.port || target?.port || 22,
     username: cfg.username ?? target?.user ?? os8.userInfo().username,
     readyTimeout: cfg.readyTimeoutMs ?? 2e4,
     keepaliveInterval: 15e3,
