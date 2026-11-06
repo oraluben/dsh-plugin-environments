@@ -7515,333 +7515,135 @@ async function loadDeps() {
 // packages/plugin/src/manager/manager.ts
 import crypto7 from "node:crypto";
 import { EventEmitter as EventEmitter7 } from "node:events";
-import fs11 from "node:fs";
+import fs10 from "node:fs";
 import os9 from "node:os";
 import path13 from "node:path";
 
 // packages/plugin/src/env/ssh/connection.ts
-import fs9 from "node:fs";
-import { createRequire } from "node:module";
+import fs8 from "node:fs";
 import os8 from "node:os";
 import path11 from "node:path";
 import ssh2 from "ssh2";
 
-// packages/plugin/src/env/ssh/resolve.ts
-import { spawn as spawn4 } from "node:child_process";
-import fs8 from "node:fs";
+// packages/plugin/src/env/ssh/ssh-config.ts
+import { execFile, spawn as spawn4 } from "node:child_process";
 import os7 from "node:os";
 import { Duplex } from "node:stream";
-var DEFAULT_TIMEOUT_MS = 1e4;
+import { promisify } from "node:util";
 function expandHome(p) {
   return p.replace(/^~(?=$|[\\/])/, os7.homedir());
 }
-var runSshG = (args, { timeoutMs, signal }) => new Promise((resolve, reject) => {
-  const child = spawn4("ssh", args, { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
-  let out = "";
-  let err = "";
-  let done = false;
-  const finish = (error) => {
-    if (done) return;
-    done = true;
-    clearTimeout(timer);
-    signal?.removeEventListener("abort", onAbort);
-    if (error) reject(error);
-    else resolve(out);
-  };
-  const onAbort = () => {
-    child.kill();
-    finish(new Error("aborted"));
-  };
-  const timer = setTimeout(() => {
-    child.kill();
-    finish(new Error(`ssh -G timed out after ${timeoutMs}ms`));
-  }, timeoutMs);
-  timer.unref?.();
-  signal?.addEventListener("abort", onAbort, { once: true });
-  child.stdout?.setEncoding("utf8");
-  child.stdout?.on("data", (d) => {
-    out += d;
-  });
-  child.stderr?.setEncoding("utf8");
-  child.stderr?.on("data", (d) => {
-    if (err.length < 4e3) err += d;
-  });
-  child.once("error", (e) => finish(e));
-  child.once("close", (code) => {
-    if (code === 0) finish();
-    else finish(new Error(err.trim() || `ssh -G exited with code ${String(code)}`));
-  });
-});
 function parseSshG(text2) {
-  let host;
-  let port;
-  let user;
-  let proxyJump;
-  let proxyCommand;
+  const values = /* @__PURE__ */ new Map();
   const identityFiles = [];
-  for (const raw of text2.split(/\r?\n/)) {
-    const line = raw.trim();
-    if (!line) continue;
-    const split = line.search(/\s/);
-    if (split < 0) continue;
-    const key = line.slice(0, split).toLowerCase();
-    const value = line.slice(split + 1).trim();
-    if (!value) continue;
-    switch (key) {
-      case "hostname":
-        host ??= value;
-        break;
-      case "port": {
-        const n = Number(value);
-        if (Number.isInteger(n) && n > 0 && n < 65536) port ??= n;
-        break;
-      }
-      case "user":
-        user ??= value;
-        break;
-      case "identityfile":
-        identityFiles.push(expandHome(value));
-        break;
-      case "proxyjump":
-        if (value !== "none") proxyJump ??= value;
-        break;
-      case "proxycommand":
-        if (value !== "none") proxyCommand ??= value;
-        break;
-      default:
-        break;
-    }
+  for (const line of text2.split(/\r?\n/)) {
+    const match = /^(\S+)\s+(.*\S)/.exec(line.trim());
+    if (!match) continue;
+    const key = (match[1] ?? "").toLowerCase();
+    const value = match[2] ?? "";
+    if (key === "identityfile") identityFiles.push(expandHome(value));
+    else if (value !== "none" && !values.has(key)) values.set(key, value);
   }
+  const host = values.get("hostname");
   if (!host) return void 0;
+  const proxyJump = values.get("proxyjump");
+  const proxyCommand = values.get("proxycommand");
   return {
-    alias: host,
     host,
-    port: port ?? 22,
-    user: user ?? os7.userInfo().username,
+    port: Number(values.get("port") ?? 22),
+    user: values.get("user") ?? os7.userInfo().username,
     identityFiles,
-    proxyJump,
-    proxyCommand
+    ...proxyJump ? { proxyJump } : {},
+    ...proxyCommand ? { proxyCommand } : {}
   };
 }
-async function resolveSshTarget(host, opts = {}) {
-  const alias = host.trim();
-  if (!alias || alias.startsWith("-")) return void 0;
-  const run = opts.run ?? runSshG;
-  const text2 = await run(["-G", "--", alias], { timeoutMs: opts.timeoutMs ?? DEFAULT_TIMEOUT_MS, signal: opts.signal });
-  const parsed = parseSshG(text2);
-  return parsed ? { ...parsed, alias } : void 0;
+async function resolveSshTarget(host, signal) {
+  try {
+    const { stdout } = await promisify(execFile)("ssh", ["-G", "--", host], {
+      timeout: 1e4,
+      windowsHide: true,
+      ...signal ? { signal } : {}
+    });
+    return parseSshG(stdout);
+  } catch {
+    return void 0;
+  }
 }
-function withResolution(cfg, res) {
-  if (!res) return cfg;
-  const key = cfg.password !== void 0 ? void 0 : res.identityFiles.find((p) => {
-    try {
-      return fs8.existsSync(p);
-    } catch {
-      return false;
-    }
-  });
-  return {
-    ...cfg,
-    host: res.host,
-    port: cfg.port ?? res.port,
-    username: cfg.username ?? res.user,
-    privateKeyPath: cfg.privateKeyPath ?? key
-  };
-}
-function expandProxyTokens(command, res) {
+function expandProxyTokens(command, dest) {
   const values = {
     "%": "%",
-    h: res.host,
-    n: res.alias,
-    p: String(res.port),
-    r: res.user,
-    d: os7.homedir()
+    h: dest.host,
+    n: dest.alias,
+    p: String(dest.port),
+    r: dest.user
   };
-  return command.replace(/%([%hLnprdu])/g, (match, token) => values[token] ?? match);
+  return command.replace(/%([%hnpr])/g, (_, token) => values[token] ?? "");
 }
-function parseJumpHop(spec) {
-  let rest = spec.trim();
-  let user;
-  const at = rest.lastIndexOf("@");
-  if (at >= 0) {
-    user = rest.slice(0, at) || void 0;
-    rest = rest.slice(at + 1);
-  }
-  let port;
-  const bracketed = /^\[([^\]]+)\](?::(\d+))?$/.exec(rest);
-  if (bracketed) {
-    rest = bracketed[1] ?? rest;
-    if (bracketed[2]) port = Number(bracketed[2]);
-  } else {
-    const colon = rest.lastIndexOf(":");
-    if (colon > 0 && /^\d+$/.test(rest.slice(colon + 1))) {
-      port = Number(rest.slice(colon + 1));
-      rest = rest.slice(0, colon);
-    }
-  }
-  return { host: rest, user, port };
-}
-function proxyJumpArgs(res) {
-  const hops = (res.proxyJump ?? "").split(",").map((s) => s.trim()).filter(Boolean);
-  const target = hops.pop();
-  if (!target) return [];
-  const last = parseJumpHop(target);
-  const args = ["-o", "BatchMode=yes", "-W", `${res.host}:${res.port}`];
+function proxyJumpArgs(proxyJump, dest) {
+  const hops = proxyJump.split(",").map((hop2) => hop2.trim());
+  const last = hops.pop() ?? "";
+  const args = ["-o", "BatchMode=yes", "-W", `${dest.host}:${dest.port}`];
   if (hops.length > 0) args.push("-J", hops.join(","));
-  if (last.port !== void 0) args.push("-p", String(last.port));
-  args.push(last.user ? `${last.user}@${last.host}` : last.host);
+  const hop = /^(?:(.+)@)?(?:\[([^\]]+)\]|([^:@]+))(?::(\d+))?$/.exec(last);
+  if (!hop || last.startsWith("ssh://")) return [...args, last];
+  const [, user, bracketed, plain, port] = hop;
+  if (user) args.push("-l", user);
+  if (port) args.push("-p", port);
+  args.push(bracketed ?? plain ?? last);
   return args;
 }
-function proxySocket(child) {
-  const sock = new Duplex({
-    read() {
-      child.stdout?.resume();
-    },
-    write(chunk2, _encoding, callback) {
-      const stdin = child.stdin;
-      if (!stdin || stdin.destroyed) {
-        callback(new Error("the proxy is not writable"));
-        return;
-      }
-      stdin.write(chunk2, () => {
-        callback();
-      });
-    },
-    final(callback) {
-      child.stdin?.end();
-      callback();
-    },
-    destroy(error, callback) {
-      child.stdout?.destroy();
-      child.stdin?.destroy();
-      child.kill();
-      callback(error);
-    }
-  });
-  child.stdout?.on("data", (chunk2) => {
-    if (!sock.push(chunk2)) child.stdout?.pause();
-  });
-  child.stdout?.on("end", () => {
-    sock.push(null);
-  });
-  return sock;
-}
-function spawnProxy(argv, shell) {
-  const child = spawn4(argv[0] ?? "", argv.slice(1), {
-    stdio: ["pipe", "pipe", "pipe"],
-    windowsHide: true,
-    ...shell ? { shell } : {}
-  });
-  let stderr = "";
-  child.stderr?.setEncoding("utf8");
-  child.stderr?.on("data", (d) => {
-    if (stderr.length < 4e3) stderr += d;
-  });
-  const sock = proxySocket(child);
-  const describe = () => stderr.trim().split(/\r?\n/).filter(Boolean).pop() ?? "";
-  child.once("error", (e) => sock.destroy(e));
-  child.once("exit", (code) => {
-    if (code !== 0) sock.destroy(new Error(describe() || `proxy exited with code ${String(code)}`));
-    else sock.destroy();
-  });
-  return {
-    sock,
-    close: () => {
-      child.kill();
-    },
-    hint: describe
-  };
-}
-function shellCommand(command) {
-  if (process.platform === "win32") return [process.env["ComSpec"] ?? "cmd.exe", "/d", "/s", "/c", command];
-  return ["/bin/sh", "-c", command];
-}
-function openProxyTransport(res) {
-  if (res.proxyCommand) return spawnProxy(shellCommand(expandProxyTokens(res.proxyCommand, res)));
-  if (res.proxyJump) {
-    const args = proxyJumpArgs(res);
-    if (args.length === 0) return void 0;
-    return spawnProxy(["ssh", ...args]);
+function openProxy(target, dest) {
+  let child;
+  if (target.proxyCommand) {
+    child = spawn4(expandProxyTokens(target.proxyCommand, dest), { shell: true, windowsHide: true });
+  } else if (target.proxyJump) {
+    child = spawn4("ssh", proxyJumpArgs(target.proxyJump, dest), { windowsHide: true });
+  } else {
+    return void 0;
   }
-  return void 0;
-}
-function describeResolution(res) {
-  const via = res.proxyJump ? ` via ${res.proxyJump}` : res.proxyCommand ? " via ProxyCommand" : "";
-  const named = res.alias === res.host ? "" : `${res.alias} \u2192 `;
-  return `${named}${res.host}:${res.port} as ${res.user}${via}`;
+  const sock = Duplex.from({ readable: child.stdout, writable: child.stdin });
+  let stderr = "";
+  let spawnError = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (d) => {
+    stderr = (stderr + d).slice(-4e3);
+  });
+  child.once("error", (e) => {
+    spawnError = e.message;
+  });
+  const closed = new Promise((resolve) => {
+    child.once("close", (code) => {
+      sock.destroy();
+      const lastLine = stderr.trim().split(/\r?\n/).pop();
+      resolve(lastLine || spawnError || (code ? `proxy exited with code ${code}` : ""));
+    });
+  });
+  return { sock, kill: () => child.kill(), closed };
 }
 
 // packages/plugin/src/env/ssh/connection.ts
-function sshClientClass() {
-  if (cachedClient !== void 0) return cachedClient;
-  const direct = pickClient(ssh2);
-  if (direct !== void 0) return cachedClient = direct;
-  for (const load of loaders) {
-    try {
-      const fromRequire = pickClient(load());
-      if (fromRequire !== void 0) return cachedClient = fromRequire;
-    } catch {
-    }
-  }
-  throw new EnvError("EIO", `ssh2 did not load: ${reportShape()}`);
-}
-var loaders = [
-  () => createRequire(import.meta.url)("ssh2"),
-  () => createRequire(import.meta.url)("ssh2/lib/client.js")
-];
-function pickClient(value, depth = 0) {
-  if (typeof value === "function") return value;
-  if (depth >= 4 || value === null || typeof value !== "object") return void 0;
-  const record = value;
-  for (const key of ["Client", "default"]) {
-    const found = pickClient(record[key], depth + 1);
-    if (found !== void 0) return found;
-  }
-  return void 0;
-}
-function reportShape() {
-  const inspect = (label, value) => {
-    if (typeof value === "function") return `${label}=function`;
-    if (value === null || typeof value !== "object") return `${label}=${String(value)}`;
-    const record = value;
-    const client = record["Client"];
-    const clientShape = typeof client === "function" ? "function" : client && typeof client === "object" ? `object(${Object.keys(client).join("/") || "no keys"})` : String(client);
-    return `${label}={${Object.keys(record).slice(0, 12).join(",")}} Client=${clientShape}`;
-  };
-  const parts = [inspect("import", ssh2)];
-  for (const [index, load] of loaders.entries()) {
-    try {
-      parts.push(inspect(`require#${index + 1}`, load()));
-    } catch (error) {
-      parts.push(`require#${index + 1}=threw(${error instanceof Error ? error.message : String(error)})`);
-    }
-  }
-  return parts.join(" | ");
-}
-var cachedClient;
-function sshConnectConfig(cfg) {
+var DEFAULT_KEY_FILES = ["id_ed25519", "id_ecdsa", "id_rsa"].map((name2) => path11.join(os8.homedir(), ".ssh", name2));
+function sshConnectConfig(cfg, target) {
   const out = {
-    host: cfg.host,
-    port: cfg.port ?? 22,
-    username: cfg.username ?? os8.userInfo().username,
+    host: target?.host ?? cfg.host,
+    port: cfg.port ?? target?.port ?? 22,
+    username: cfg.username ?? target?.user ?? os8.userInfo().username,
     readyTimeout: cfg.readyTimeoutMs ?? 2e4,
     keepaliveInterval: 15e3,
     keepaliveCountMax: 4
   };
   if (cfg.password) out.password = cfg.password;
   if (cfg.privateKeyPath) {
-    const p = cfg.privateKeyPath.replace(/^~(?=$|[\\/])/, os8.homedir());
-    out.privateKey = fs9.readFileSync(p);
+    out.privateKey = fs8.readFileSync(expandHome(cfg.privateKeyPath));
     if (cfg.passphrase) out.passphrase = cfg.passphrase;
   }
   if (!out.password && !out.privateKey) {
     if (process.platform === "win32") out.agent = "\\\\.\\pipe\\openssh-ssh-agent";
     else if (process.env["SSH_AUTH_SOCK"]) out.agent = process.env["SSH_AUTH_SOCK"];
-    for (const name2 of ["id_ed25519", "id_ecdsa", "id_rsa"]) {
-      const p = path11.join(os8.homedir(), ".ssh", name2);
-      if (!out.privateKey && fs9.existsSync(p)) {
+    for (const p of target?.identityFiles ?? DEFAULT_KEY_FILES) {
+      if (!out.privateKey && fs8.existsSync(p)) {
         try {
-          out.privateKey = fs9.readFileSync(p);
+          out.privateKey = fs8.readFileSync(p);
         } catch {
         }
       }
@@ -7850,53 +7652,41 @@ function sshConnectConfig(cfg) {
   return out;
 }
 async function connectClient(cfg, signal) {
-  const resolution = cfg.sshConfig === "off" ? void 0 : await resolveSshTarget(cfg.host, { signal }).catch(() => void 0);
-  const effective = withResolution(cfg, resolution);
-  const proxy = resolution ? openProxyTransport(resolution) : void 0;
-  const target = resolution ? describeResolution(resolution) : `${effective.host}:${effective.port ?? 22}`;
+  const target = cfg.sshConfig === "off" ? void 0 : await resolveSshTarget(cfg.host, signal);
+  if (signal?.aborted) throw new EnvError("CANCELLED", "aborted");
+  let options;
+  try {
+    options = sshConnectConfig(cfg, target);
+  } catch (e) {
+    throw new EnvError("EINVAL", `ssh config: ${errorMessage(e)}`);
+  }
+  const proxy = target && openProxy(target, { alias: cfg.host, host: options.host, port: options.port, user: options.username });
   return new Promise((resolve, reject) => {
-    const conn = new (sshClientClass())();
-    let settled = false;
+    const conn = new ssh2.Client();
     const onAbort = () => {
-      proxy?.close();
+      proxy?.kill();
       conn.end();
-      if (settled) return;
-      settled = true;
       reject(new EnvError("CANCELLED", "aborted"));
     };
     signal?.addEventListener("abort", onAbort, { once: true });
     conn.once("ready", () => {
       signal?.removeEventListener("abort", onAbort);
-      if (settled) return;
-      settled = true;
       resolve(conn);
     });
     conn.once("error", (e) => {
       signal?.removeEventListener("abort", onAbort);
-      const hint = proxy?.hint();
-      proxy?.close();
-      if (settled) return;
-      settled = true;
-      reject(
-        new EnvError(
-          e.level === "client-authentication" ? "AUTH" : "EIO",
-          `ssh ${target}: ${e.message}${hint ? ` (${hint})` : ""}`
-        )
-      );
+      proxy?.kill();
+      const code = e.level === "client-authentication" ? "AUTH" : "EIO";
+      void (proxy?.closed ?? Promise.resolve("")).then((reason) => {
+        reject(new EnvError(code, `ssh ${cfg.host}: ${e.message}${reason ? ` (${reason})` : ""}`));
+      });
     });
-    conn.once("close", () => {
-      signal?.removeEventListener("abort", onAbort);
-      proxy?.close();
-    });
+    conn.once("close", () => proxy?.kill());
     try {
-      const options = sshConnectConfig(effective);
       conn.connect(proxy ? { ...options, sock: proxy.sock } : options);
     } catch (e) {
-      proxy?.close();
-      if (!settled) {
-        settled = true;
-        reject(new EnvError("EINVAL", `ssh config: ${errorMessage(e)}`));
-      }
+      proxy?.kill();
+      reject(new EnvError("EINVAL", `ssh config: ${errorMessage(e)}`));
     }
   });
 }
@@ -8601,7 +8391,7 @@ async function openSsh({ id, name: name2, config, signal }) {
 // packages/plugin/src/env/winuser/winuser-env.ts
 import { spawn as spawn5 } from "node:child_process";
 import crypto6 from "node:crypto";
-import fs10 from "node:fs";
+import fs9 from "node:fs";
 import net6 from "node:net";
 import path12 from "node:path";
 function sessionShellCommand(binary, port, token, cwd) {
@@ -8630,7 +8420,7 @@ function privateDesktopName(account) {
   return `dsh-${safe || "account"}`;
 }
 function sha256(file) {
-  return crypto6.createHash("sha256").update(fs10.readFileSync(file)).digest("hex");
+  return crypto6.createHash("sha256").update(fs9.readFileSync(file)).digest("hex");
 }
 function sharedBinary(binary, base = process.env["ProgramData"] ?? "C:\\ProgramData") {
   const src = serverBinary(binary);
@@ -8638,16 +8428,16 @@ function sharedBinary(binary, base = process.env["ProgramData"] ?? "C:\\ProgramD
   try {
     const hash = sha256(src);
     const dst = path12.join(dir, `dsh-env-server-${hash.slice(0, 16)}.exe`);
-    fs10.mkdirSync(dir, { recursive: true });
-    if (!fs10.existsSync(dst) || sha256(dst) !== hash) {
+    fs9.mkdirSync(dir, { recursive: true });
+    if (!fs9.existsSync(dst) || sha256(dst) !== hash) {
       const tmp = `${dst}.${process.pid}.tmp`;
-      fs10.copyFileSync(src, tmp);
-      fs10.renameSync(tmp, dst);
+      fs9.copyFileSync(src, tmp);
+      fs9.renameSync(tmp, dst);
     }
-    for (const f of fs10.readdirSync(dir)) {
+    for (const f of fs9.readdirSync(dir)) {
       if (/^dsh-env-server.*\.exe$/i.test(f) && path12.join(dir, f) !== dst) {
         try {
-          fs10.rmSync(path12.join(dir, f), { force: true });
+          fs9.rmSync(path12.join(dir, f), { force: true });
         } catch {
         }
       }
@@ -8871,7 +8661,7 @@ async function openWindowsAccount({
 }) {
   if (process.platform !== "win32") throw new EnvError("UNSUPPORTED", "Windows accounts are only available on Windows");
   const secret = secretPath(dataDir, account);
-  if (!fs10.existsSync(secret)) {
+  if (!fs9.existsSync(secret)) {
     throw new EnvError("ENOENT", `no stored credentials for account ${account}; recreate it from the Environments page`);
   }
   const bin = sharedBinary();
@@ -9085,9 +8875,9 @@ var EnvironmentManager = class extends EventEmitter7 {
   }
   // ---------------------------------------------------------------- persistence
   load() {
-    fs11.mkdirSync(this.dataDir, { recursive: true });
+    fs10.mkdirSync(this.dataDir, { recursive: true });
     try {
-      const raw = JSON.parse(fs11.readFileSync(this.file, "utf8"));
+      const raw = JSON.parse(fs10.readFileSync(this.file, "utf8"));
       this.state = { ...this.state, ...raw };
     } catch {
     }
@@ -9107,10 +8897,10 @@ var EnvironmentManager = class extends EventEmitter7 {
   flush() {
     clearTimeout(this.saveTimer);
     try {
-      fs11.mkdirSync(this.dataDir, { recursive: true });
+      fs10.mkdirSync(this.dataDir, { recursive: true });
       const tmp = `${this.file}.tmp`;
-      fs11.writeFileSync(tmp, JSON.stringify(this.state, null, 2));
-      fs11.renameSync(tmp, this.file);
+      fs10.writeFileSync(tmp, JSON.stringify(this.state, null, 2));
+      fs10.renameSync(tmp, this.file);
     } catch (e) {
       this.logger?.warn("environments: cannot save state: %s", errorMessage(e));
     }
@@ -9668,8 +9458,8 @@ var EnvironmentManager = class extends EventEmitter7 {
     const base = path13.posix.basename(root.replace(/\\/g, "/"));
     const name2 = `${slug(def.id)}-${slug(base || "root")}-${id}`;
     const hostPath = path13.join(mountsDir, name2);
-    fs11.mkdirSync(hostPath, { recursive: true });
-    fs11.writeFileSync(
+    fs10.mkdirSync(hostPath, { recursive: true });
+    fs10.writeFileSync(
       path13.join(hostPath, ".dsh-environment-mount.json"),
       JSON.stringify(
         {
